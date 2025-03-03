@@ -1,398 +1,574 @@
 // ==UserScript==
-// @name         Douyin Video Metadata Downloader
+// @name         Douyin User Video Downloader
 // @namespace    http://tampermonkey.net/
-// @version      1.1
-// @description  Download videos and metadata from Douyin user profiles
+// @version      1.2
+// @description  Extract video, audio, links and metadata from Douyin user profiles
 // @author       CaoCuong2404
 // @match        https://www.douyin.com/user/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=douyin.com
 // @grant        none
+// @run-at       document-end
 // ==/UserScript==
 
-(function() {
-    'use strict';
+(function () {
+  "use strict";
 
-    // Configuration
-    const CONFIG = {
-        API_BASE_URL: "https://www.douyin.com/aweme/v1/web/aweme/post/",
-        USER_AGENT: 
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36 Edg/118.0.0.0",
-        RETRY_DELAY_MS: 2000,
-        MAX_RETRIES: 5,
-        REQUEST_DELAY_MS: 1000,
-    };
+  // Add Tailwind CSS
+  const tailwindCDN = document.createElement("script");
+  tailwindCDN.src = "https://cdn.tailwindcss.com";
+  document.head.appendChild(tailwindCDN);
 
-    function addUI() {
-        const container = document.createElement('div');
-        container.style.position = 'fixed';
-        container.style.top = '80px';
-        container.style.right = '20px';
-        container.style.zIndex = '9999';
-        container.style.backgroundColor = 'white';
-        container.style.border = '1px solid #ccc';
-        container.style.borderRadius = '5px';
-        container.style.padding = '10px';
-        container.style.boxShadow = '0 0 10px rgba(0,0,0,0.1)';
-        container.style.width = '250px';
+  // Global state
+  const state = {
+    videos: [],
+    selectedVideos: new Set(),
+    isFetching: false,
+    fetchedCount: 0,
+    totalFound: 0,
+  };
 
-        const title = document.createElement('h3');
-        title.textContent = 'Douyin Downloader';
-        title.style.margin = '0 0 10px 0';
-        title.style.padding = '0 0 5px 0';
-        title.style.borderBottom = '1px solid #eee';
-        container.appendChild(title);
+  function createMainUI() {
+    const container = document.createElement("div");
+    container.className = "fixed top-4 right-4 w-[900px] bg-white rounded-lg shadow-lg p-4 z-50 max-h-[90vh] flex flex-col";
+    container.id = "douyin-downloader";
 
-        // Add download options
-        const optionsDiv = document.createElement('div');
-        optionsDiv.style.margin = '10px 0';
-        
-        // JSON Metadata option
-        const jsonOption = document.createElement('div');
-        const jsonCheckbox = document.createElement('input');
-        jsonCheckbox.type = 'checkbox';
-        jsonCheckbox.id = 'download-json';
-        jsonCheckbox.checked = true;
-        const jsonLabel = document.createElement('label');
-        jsonLabel.htmlFor = 'download-json';
-        jsonLabel.textContent = 'Download JSON metadata';
-        jsonLabel.style.marginLeft = '5px';
-        jsonOption.appendChild(jsonCheckbox);
-        jsonOption.appendChild(jsonLabel);
-        
-        // Text Links option
-        const txtOption = document.createElement('div');
-        const txtCheckbox = document.createElement('input');
-        txtCheckbox.type = 'checkbox';
-        txtCheckbox.id = 'download-txt';
-        txtCheckbox.checked = true;
-        const txtLabel = document.createElement('label');
-        txtLabel.htmlFor = 'download-txt';
-        txtLabel.textContent = 'Download video links (TXT)';
-        txtLabel.style.marginLeft = '5px';
-        txtOption.appendChild(txtCheckbox);
-        txtOption.appendChild(txtLabel);
-        
-        optionsDiv.appendChild(jsonOption);
-        optionsDiv.appendChild(txtOption);
-        container.appendChild(optionsDiv);
+    container.innerHTML = `
+      <div class="flex items-center justify-between mb-4">
+        <div class="flex items-center space-x-2">
+          <img src="https://www.douyin.com/favicon.ico" class="w-6 h-6" alt="Douyin">
+          <h2 class="text-xl font-bold text-gray-800">Douyin Downloader</h2>
+        </div>
+        <div id="fetch-status" class="text-sm text-gray-500"></div>
+      </div>
 
-        const downloadBtn = document.createElement('button');
-        downloadBtn.textContent = 'Download All Videos';
-        downloadBtn.style.width = '100%';
-        downloadBtn.style.padding = '8px';
-        downloadBtn.style.backgroundColor = '#ff0050';
-        downloadBtn.style.color = 'white';
-        downloadBtn.style.border = 'none';
-        downloadBtn.style.borderRadius = '4px';
-        downloadBtn.style.cursor = 'pointer';
-        downloadBtn.style.marginBottom = '10px';
-        container.appendChild(downloadBtn);
-
-        const statusElement = document.createElement('div');
-        statusElement.id = 'downloader-status';
-        statusElement.style.fontSize = '14px';
-        statusElement.style.marginTop = '10px';
-        container.appendChild(statusElement);
-
-        document.body.appendChild(container);
-
-        downloadBtn.addEventListener('click', async () => {
-            const downloadJson = document.getElementById('download-json').checked;
-            const downloadTxt = document.getElementById('download-txt').checked;
+      <div class="border rounded-lg flex-1 flex flex-col overflow-hidden">
+        <div class="p-4 border-b bg-gray-50 flex items-center justify-between">
+          <div class="flex items-center space-x-4">
+            <div class="flex items-center space-x-2">
+              <input type="checkbox" id="select-all" class="rounded text-[#FE2C55]">
+              <label for="select-all" class="text-sm font-medium text-gray-700">
+                Select All (<span id="selected-count">0</span>/<span id="total-count">0</span>)
+              </label>
+            </div>
             
-            if (!downloadJson && !downloadTxt) {
-                statusElement.textContent = 'Please select at least one download option';
-                return;
+            <div class="h-4 border-l border-gray-300"></div>
+            
+            <div class="flex items-center space-x-2" id="action-buttons">
+              <div class="relative inline-block text-left" id="download-dropdown">
+                <button disabled id="download-btn" class="px-3 py-1.5 text-sm font-medium text-white bg-[#FE2C55] rounded-md shadow-sm hover:bg-[#fe2c55]/90 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[#FE2C55] disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center">
+                  Download
+                  <svg class="w-4 h-4 ml-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+                <div class="hidden absolute right-0 mt-2 w-48 rounded-md shadow-lg bg-white ring-1 ring-black ring-opacity-5 z-50" id="dropdown-menu">
+                  <div class="py-1">
+                    <button class="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100" data-action="audio">
+                      Download Audios (MP3)
+                    </button>
+                    <button class="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100" data-action="video">
+                      Download Videos (MP4)
+                    </button>
+                    <button class="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100" data-action="json">
+                      Download Metadata (JSON)
+                    </button>
+                    <button class="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100" data-action="txt">
+                      Download Links (TXT)
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          
+          <button id="fetch-videos" class="px-3 py-1.5 text-sm font-medium text-white bg-[#FE2C55] rounded-md shadow-sm hover:bg-[#fe2c55]/90 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[#FE2C55] inline-flex items-center">
+            <span>Fetch Videos</span>
+          </button>
+        </div>
+        
+        <div class="overflow-auto flex-1">
+          <table class="min-w-full divide-y divide-gray-200">
+            <thead class="bg-gray-50 sticky top-0">
+              <tr>
+                <th scope="col" class="w-12 px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  Select
+                </th>
+                <th scope="col" class="w-16 px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  No.
+                </th>
+                <th scope="col" class="w-16 px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  Cover
+                </th>
+                <th scope="col" class="w-[300px] px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  Title
+                </th>
+                <th scope="col" class="w-32 px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  Date
+                </th>
+                <th scope="col" class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  Actions
+                </th>
+              </tr>
+            </thead>
+            <tbody id="videos-table-body" class="bg-white divide-y divide-gray-200">
+              <!-- Videos will be inserted here -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+
+    return container;
+  }
+
+  function createVideoRow(video, index) {
+    const row = document.createElement("tr");
+    row.className = "hover:bg-gray-50";
+
+    const date = new Date(video.createTime);
+    const formattedDate = date.toLocaleDateString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+    });
+
+    row.innerHTML = `
+      <td class="px-4 py-4 whitespace-nowrap">
+        <input type="checkbox" data-video-id="${video.id}" class="video-checkbox rounded text-[#FE2C55]">
+      </td>
+      <td class="px-4 py-4 whitespace-nowrap text-sm text-gray-500">
+        ${index + 1}
+      </td>
+      <td class="px-4 py-4 whitespace-nowrap">
+        <div class="w-12 h-12 rounded-lg overflow-hidden">
+          <img src="${video.dynamicCoverUrl || video.coverUrl}" class="w-full h-full object-cover" alt="${video.title}">
+        </div>
+      </td>
+      <td class="px-4 py-4 whitespace-nowrap">
+        <div class="text-sm text-gray-900 font-medium truncate max-w-[300px]" title="${video.title}">
+          ${video.title}
+        </div>
+      </td>
+      <td class="px-4 py-4 whitespace-nowrap text-sm text-gray-500">
+        ${formattedDate}
+      </td>
+      <td class="px-4 py-4 whitespace-nowrap text-sm">
+        <div class="flex items-center space-x-2">
+          <a href="${video.videoUrl}" target="_blank" class="text-[#FE2C55] hover:text-[#fe2c55]/90">
+            Video
+          </a>
+          ${
+            video.audioUrl
+              ? `
+            <span class="text-gray-300">|</span>
+            <a href="${video.audioUrl}" target="_blank" class="text-[#FE2C55] hover:text-[#fe2c55]/90">
+              Audio
+            </a>
+          `
+              : ""
+          }
+        </div>
+      </td>
+    `;
+
+    return row;
+  }
+
+  function updateUI() {
+    const selectedCount = state.selectedVideos.size;
+    const totalCount = state.videos.length;
+
+    // Update counts
+    document.getElementById("selected-count").textContent = selectedCount;
+    document.getElementById("total-count").textContent = totalCount;
+
+    // Update select all checkbox
+    const selectAllCheckbox = document.getElementById("select-all");
+    selectAllCheckbox.checked = selectedCount === totalCount && totalCount > 0;
+
+    // Update download button
+    const downloadBtn = document.getElementById("download-btn");
+    downloadBtn.disabled = selectedCount === 0;
+  }
+
+  function setupEventListeners() {
+    // Fetch videos button
+    document.getElementById("fetch-videos").addEventListener("click", async () => {
+      if (state.isFetching) return;
+
+      state.isFetching = true;
+      state.fetchedCount = 0;
+      state.videos = [];
+      state.selectedVideos.clear();
+
+      const button = document.getElementById("fetch-videos");
+      const statusEl = document.getElementById("fetch-status");
+      const tableBody = document.getElementById("videos-table-body");
+      tableBody.innerHTML = "";
+
+      button.disabled = true;
+      button.innerHTML = `
+        <svg class="animate-spin h-4 w-4 mr-2" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+        </svg>
+        Fetching...
+      `;
+
+      try {
+        const downloader = new DouyinDownloader();
+        await downloader.fetchAllVideos((newVideos) => {
+          // Sort new videos by date (latest first)
+          newVideos.sort((a, b) => new Date(b.createTime) - new Date(a.createTime));
+
+          // Add new videos to state
+          state.videos.push(...newVideos);
+          state.fetchedCount += newVideos.length;
+
+          // Update table
+          state.videos.forEach((video, index) => {
+            const existingRow = document.querySelector(`[data-video-id="${video.id}"]`)?.closest("tr");
+            if (!existingRow) {
+              tableBody.appendChild(createVideoRow(video, index));
             }
-            
-            const downloader = new DouyinDownloader(statusElement);
-            downloader.downloadOptions = { downloadJson, downloadTxt };
-            await downloader.downloadAllVideos();
+          });
+
+          // Update status
+          statusEl.textContent = `Fetched ${state.fetchedCount} videos`;
+          updateUI();
         });
+
+        setupTableEventListeners();
+      } catch (error) {
+        console.error("Error fetching videos:", error);
+        statusEl.textContent = "Error: " + error.message;
+      } finally {
+        state.isFetching = false;
+        button.disabled = false;
+        button.innerHTML = "<span>Fetch Videos</span>";
+      }
+    });
+
+    // Download dropdown
+    const downloadBtn = document.getElementById("download-btn");
+    const dropdownMenu = document.getElementById("dropdown-menu");
+
+    downloadBtn.addEventListener("click", () => {
+      dropdownMenu.classList.toggle("hidden");
+    });
+
+    // Close dropdown when clicking outside
+    document.addEventListener("click", (e) => {
+      if (!downloadBtn.contains(e.target)) {
+        dropdownMenu.classList.add("hidden");
+      }
+    });
+
+    // Download actions
+    dropdownMenu.addEventListener("click", (e) => {
+      const action = e.target.dataset.action;
+      if (!action) return;
+
+      const selectedVideos = state.videos.filter((v) => state.selectedVideos.has(v.id));
+
+      switch (action) {
+        case "audio":
+          selectedVideos.forEach((video) => {
+            if (video.audioUrl) window.open(video.audioUrl, "_blank");
+          });
+          break;
+        case "video":
+          selectedVideos.forEach((video) => {
+            if (video.videoUrl) window.open(video.videoUrl, "_blank");
+          });
+          break;
+        case "json":
+          FileHandler.saveVideoUrls(selectedVideos, { downloadJson: true, downloadTxt: false });
+          break;
+        case "txt":
+          FileHandler.saveVideoUrls(selectedVideos, { downloadJson: false, downloadTxt: true });
+          break;
+      }
+
+      dropdownMenu.classList.add("hidden");
+    });
+  }
+
+  function setupTableEventListeners() {
+    // Select all checkbox
+    document.getElementById("select-all").addEventListener("change", (e) => {
+      const checkboxes = document.querySelectorAll(".video-checkbox");
+      checkboxes.forEach((checkbox) => {
+        checkbox.checked = e.target.checked;
+        const videoId = checkbox.dataset.videoId;
+        if (e.target.checked) {
+          state.selectedVideos.add(videoId);
+        } else {
+          state.selectedVideos.delete(videoId);
+        }
+      });
+      updateUI();
+    });
+
+    // Individual video checkboxes
+    document.querySelectorAll(".video-checkbox").forEach((checkbox) => {
+      checkbox.addEventListener("change", (e) => {
+        const videoId = e.target.dataset.videoId;
+        if (e.target.checked) {
+          state.selectedVideos.add(videoId);
+        } else {
+          state.selectedVideos.delete(videoId);
+        }
+        updateUI();
+      });
+    });
+  }
+
+  // Configuration
+  const CONFIG = {
+    API_BASE_URL: "https://www.douyin.com/aweme/v1/web/aweme/post/",
+    DEFAULT_HEADERS: {
+      accept: "application/json, text/plain, */*",
+      "accept-language": "vi",
+      "sec-ch-ua": '"Not?A_Brand";v="8", "Chromium";v="118", "Microsoft Edge";v="118"',
+      "sec-ch-ua-mobile": "?0",
+      "sec-ch-ua-platform": '"Windows"',
+      "sec-fetch-dest": "empty",
+      "sec-fetch-mode": "cors",
+      "sec-fetch-site": "same-origin",
+      "user-agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36 Edg/118.0.0.0",
+    },
+    RETRY_DELAY_MS: 2000,
+    MAX_RETRIES: 5,
+    REQUEST_DELAY_MS: 1000,
+  };
+
+  // Utility functions
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  const retryWithDelay = async (fn, retries = CONFIG.MAX_RETRIES) => {
+    let lastError;
+    for (let i = 0; i < retries; i++) {
+      try {
+        return await fn();
+      } catch (error) {
+        lastError = error;
+        console.log(`Attempt ${i + 1} failed:`, error);
+        await sleep(CONFIG.RETRY_DELAY_MS);
+      }
+    }
+    throw lastError;
+  };
+
+  // API Client
+  class DouyinApiClient {
+    constructor(secUserId) {
+      this.secUserId = secUserId;
     }
 
-    // Utility functions
-    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    async fetchVideos(maxCursor) {
+      const url = new URL(CONFIG.API_BASE_URL);
+      const params = {
+        device_platform: "webapp",
+        aid: "6383",
+        channel: "channel_pc_web",
+        sec_user_id: this.secUserId,
+        max_cursor: maxCursor,
+        count: "20",
+        version_code: "170400",
+        version_name: "17.4.0",
+      };
 
-    const retryWithDelay = async (fn, retries = CONFIG.MAX_RETRIES) => {
-        let lastError;
-        for (let i = 0; i < retries; i++) {
-            try {
-                return await fn();
-            } catch (error) {
-                lastError = error;
-                console.log(`Attempt ${i + 1} failed:`, error);
-                await sleep(CONFIG.RETRY_DELAY_MS);
-            }
+      Object.entries(params).forEach(([key, value]) => url.searchParams.append(key, value));
+
+      const response = await fetch(url, {
+        headers: {
+          ...CONFIG.DEFAULT_HEADERS,
+          referrer: `https://www.douyin.com/user/${this.secUserId}`,
+        },
+        credentials: "include",
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP Error: ${response.status}`);
+      }
+
+      return response.json();
+    }
+  }
+
+  // Data Processing
+  class VideoDataProcessor {
+    static extractVideoMetadata(video) {
+      if (!video) return null;
+
+      // Initialize the metadata object
+      const metadata = {
+        id: video.aweme_id || "",
+        desc: video.desc || "",
+        title: video.desc || "", // Using desc as the title since title field isn't directly available
+        createTime: video.create_time ? new Date(video.create_time * 1000).toISOString() : "",
+        videoUrl: "",
+        audioUrl: "",
+        coverUrl: "",
+        dynamicCoverUrl: "",
+      };
+
+      // Extract video URL
+      if (video.video?.play_addr) {
+        metadata.videoUrl = video.video.play_addr.url_list[0];
+        if (metadata.videoUrl && !metadata.videoUrl.startsWith("https")) {
+          metadata.videoUrl = metadata.videoUrl.replace("http", "https");
         }
-        throw lastError;
-    };
-
-    // API Client
-    class DouyinApiClient {
-        constructor(secUserId) {
-            this.secUserId = secUserId;
+      } else if (video.video?.download_addr) {
+        metadata.videoUrl = video.video.download_addr.url_list[0];
+        if (metadata.videoUrl && !metadata.videoUrl.startsWith("https")) {
+          metadata.videoUrl = metadata.videoUrl.replace("http", "https");
         }
+      }
 
-        async fetchVideos(maxCursor) {
-            const url = new URL(CONFIG.API_BASE_URL);
-            const params = {
-                device_platform: "webapp",
-                aid: "6383",
-                channel: "channel_pc_web",
-                sec_user_id: this.secUserId,
-                max_cursor: maxCursor,
-                count: "20",
-                version_code: "170400",
-                version_name: "17.4.0",
-                cookie_enabled: "true",
-                screen_width: "1920",
-                screen_height: "1080",
-                browser_language: "en-US",
-                browser_platform: "Win32",
-                browser_name: "Chrome",
-                browser_version: "118.0.0.0",
-                browser_online: "true",
-                tzName: "America/Los_Angeles",
-                cursor: maxCursor,
-                web_id: "7242155500523021835",
-            };
+      // Extract audio URL
+      if (video.music?.play_url) {
+        metadata.audioUrl = video.music.play_url.url_list[0];
+      }
 
-            Object.entries(params).forEach(([key, value]) => {
-                url.searchParams.append(key, value);
-            });
+      // Extract cover URL (static thumbnail)
+      if (video.video?.cover) {
+        metadata.coverUrl = video.video.cover.url_list[0];
+      } else if (video.cover) {
+        metadata.coverUrl = video.cover.url_list[0];
+      }
 
-            const response = await fetch(url.toString(), {
-                headers: {
-                    "User-Agent": CONFIG.USER_AGENT,
-                },
-                method: "GET",
-            });
+      // Extract dynamic cover URL (animated thumbnail)
+      if (video.video?.dynamic_cover) {
+        metadata.dynamicCoverUrl = video.video.dynamic_cover.url_list[0];
+      } else if (video.dynamic_cover) {
+        metadata.dynamicCoverUrl = video.dynamic_cover.url_list[0];
+      }
 
-            if (!response.ok) {
-                throw new Error(`API response error: ${response.status}`);
-            }
-
-            return await response.json();
-        }
+      return metadata;
     }
 
-    class VideoDataProcessor {
-        static extractVideoMetadata(video) {
-            if (!video) return null;
+    static processVideoData(data) {
+      if (!data?.aweme_list) {
+        return { videoData: [], hasMore: false, maxCursor: 0 };
+      }
 
-            // Extract required metadata fields
-            const id = video.aweme_id || '';
-            const desc = video.desc || '';
-            const title = desc;  // Using description as title
-                        
-            // Format creation time as ISO date string
-            const createTime = video.create_time ? 
-                new Date(video.create_time * 1000).toISOString() : '';
-            
-            // Extract video URL
-            let videoUrl = '';
-            if (video.video && video.video.play_addr && 
-                video.video.play_addr.url_list && 
-                video.video.play_addr.url_list.length > 0) {
-                videoUrl = video.video.play_addr.url_list[0];
-                
-                // Convert HTTP to HTTPS if needed
-                if (videoUrl.startsWith('http:')) {
-                    videoUrl = videoUrl.replace('http:', 'https:');
-                }
-            }
-            
-            // Extract audio URL
-            let audioUrl = '';
-            if (video.music && video.music.play_url && 
-                video.music.play_url.url_list && 
-                video.music.play_url.url_list.length > 0) {
-                audioUrl = video.music.play_url.url_list[0];
-            }
-            
-            // Extract cover image URL
-            let coverUrl = '';
-            if (video.video && video.video.cover && 
-                video.video.cover.url_list && 
-                video.video.cover.url_list.length > 0) {
-                coverUrl = video.video.cover.url_list[0];
-            }
-            
-            // Extract dynamic cover URL (animated)
-            let dynamicCoverUrl = '';
-            if (video.video && video.video.dynamic_cover && 
-                video.video.dynamic_cover.url_list && 
-                video.video.dynamic_cover.url_list.length > 0) {
-                dynamicCoverUrl = video.video.dynamic_cover.url_list[0];
-            }
-            
-            return {
-                id,
-                desc,
-                title,
-                createTime,
-                videoUrl,
-                audioUrl,
-                coverUrl,
-                dynamicCoverUrl
-            };
-        }
+      const videoData = data.aweme_list.map((video) => this.extractVideoMetadata(video)).filter((item) => item && item.videoUrl);
 
-        static processVideoData(data) {
-            // Check if we have valid data with the aweme_list property
-            if (!data || !data.aweme_list || !Array.isArray(data.aweme_list)) {
-                console.warn("Invalid video data format", data);
-                return [];
-            }
-            
-            // Process each video to extract metadata
-            return data.aweme_list
-                .map(video => this.extractVideoMetadata(video))
-                .filter(video => video && video.videoUrl); // Filter out videos without URLs
-        }
+      return {
+        videoData,
+        hasMore: data.has_more,
+        maxCursor: data.max_cursor,
+      };
+    }
+  }
+
+  // File Handler
+  class FileHandler {
+    static saveVideoUrls(videoData, options = { downloadJson: true, downloadTxt: true }) {
+      if (!videoData || videoData.length === 0) {
+        console.warn("No video data to save");
+        return { savedCount: 0 };
+      }
+
+      const now = new Date();
+      const timestamp = now.toISOString().replace(/[:.]/g, "-");
+      let savedCount = 0;
+
+      // Save complete JSON data if option is enabled
+      if (options.downloadJson) {
+        const jsonContent = JSON.stringify(videoData, null, 2);
+        const jsonBlob = new Blob([jsonContent], { type: "application/json" });
+        const jsonUrl = URL.createObjectURL(jsonBlob);
+
+        const jsonLink = document.createElement("a");
+        jsonLink.href = jsonUrl;
+        jsonLink.download = `douyin-video-data-${timestamp}.json`;
+        jsonLink.style.display = "none";
+        document.body.appendChild(jsonLink);
+        jsonLink.click();
+        document.body.removeChild(jsonLink);
+
+        console.log(`Saved ${videoData.length} videos with metadata to JSON file`);
+      }
+
+      // Save plain URLs list if option is enabled
+      if (options.downloadTxt) {
+        // Create a list of video URLs
+        const urlList = videoData.map((video) => video.videoUrl).join("\n");
+        const txtBlob = new Blob([urlList], { type: "text/plain" });
+        const txtUrl = URL.createObjectURL(txtBlob);
+
+        const txtLink = document.createElement("a");
+        txtLink.href = txtUrl;
+        txtLink.download = `douyin-video-links-${timestamp}.txt`;
+        txtLink.style.display = "none";
+        document.body.appendChild(txtLink);
+        txtLink.click();
+        document.body.removeChild(txtLink);
+
+        console.log(`Saved ${videoData.length} video URLs to text file`);
+      }
+
+      savedCount = videoData.length;
+      return { savedCount };
+    }
+  }
+
+  // Main Downloader
+  class DouyinDownloader {
+    constructor() {
+      this.validateEnvironment();
+      const secUserId = this.extractSecUserId();
+      this.apiClient = new DouyinApiClient(secUserId);
     }
 
-    class FileHandler {
-        static saveVideoUrls(videoData, options = { downloadJson: true, downloadTxt: true }) {
-            if (!videoData || videoData.length === 0) {
-                console.warn("No video data to save");
-                return { savedCount: 0 };
-            }
-            
-            const now = new Date();
-            const timestamp = now.toISOString().replace(/[:.]/g, '-');
-            let savedCount = 0;
-            
-            // Save complete JSON data if option is enabled
-            if (options.downloadJson) {
-                const jsonContent = JSON.stringify(videoData, null, 2);
-                const jsonBlob = new Blob([jsonContent], { type: 'application/json' });
-                const jsonUrl = URL.createObjectURL(jsonBlob);
-                
-                const jsonLink = document.createElement('a');
-                jsonLink.href = jsonUrl;
-                jsonLink.download = `douyin-video-data-${timestamp}.json`;
-                jsonLink.style.display = 'none';
-                document.body.appendChild(jsonLink);
-                jsonLink.click();
-                document.body.removeChild(jsonLink);
-                
-                console.log(`Saved ${videoData.length} videos with metadata to JSON file`);
-            }
-            
-            // Save plain URLs list if option is enabled
-            if (options.downloadTxt) {
-                // Create a list of video URLs
-                const urlList = videoData.map(video => video.videoUrl).join('\n');
-                const txtBlob = new Blob([urlList], { type: 'text/plain' });
-                const txtUrl = URL.createObjectURL(txtBlob);
-                
-                const txtLink = document.createElement('a');
-                txtLink.href = txtUrl;
-                txtLink.download = `douyin-video-links-${timestamp}.txt`;
-                txtLink.style.display = 'none';
-                document.body.appendChild(txtLink);
-                txtLink.click();
-                document.body.removeChild(txtLink);
-                
-                console.log(`Saved ${videoData.length} video URLs to text file`);
-            }
-            
-            savedCount = videoData.length;
-            return { savedCount };
-        }
+    validateEnvironment() {
+      if (typeof window === "undefined" || !window.location) {
+        throw new Error("Script must be run in a browser environment");
+      }
     }
 
-    class DouyinDownloader {
-        constructor(statusElement) {
-            this.statusElement = statusElement;
-            this.downloadOptions = { downloadJson: true, downloadTxt: true };
-        }
-
-        validateEnvironment() {
-            // Check if we're on a Douyin user profile page
-            const url = window.location.href;
-            return url.includes('douyin.com/user/');
-        }
-
-        extractSecUserId() {
-            const url = window.location.href;
-            const match = url.match(/user\/([^?/]+)/);
-            return match ? match[1] : null;
-        }
-        
-        updateStatus(message) {
-            if (this.statusElement) {
-                this.statusElement.textContent = message;
-            }
-            console.log(message);
-        }
-
-        async downloadAllVideos() {
-            try {
-                if (!this.validateEnvironment()) {
-                    this.updateStatus('This script only works on Douyin user profile pages');
-                    return;
-                }
-
-                const secUserId = this.extractSecUserId();
-                if (!secUserId) {
-                    this.updateStatus('Could not find user ID in URL');
-                    return;
-                }
-
-                this.updateStatus('Starting download process...');
-                const client = new DouyinApiClient(secUserId);
-                
-                let hasMore = true;
-                let maxCursor = 0;
-                let allVideos = [];
-                
-                while (hasMore) {
-                    this.updateStatus(`Fetching videos, cursor: ${maxCursor}...`);
-                    
-                    const data = await retryWithDelay(async () => {
-                        return await client.fetchVideos(maxCursor);
-                    });
-                    
-                    const videos = VideoDataProcessor.processVideoData(data);
-                    allVideos = allVideos.concat(videos);
-                    
-                    this.updateStatus(`Found ${videos.length} videos (total: ${allVideos.length})`);
-                    
-                    // Check if there are more videos to fetch
-                    hasMore = data.has_more === 1;
-                    maxCursor = data.max_cursor;
-                    
-                    // Add a delay to avoid rate limiting
-                    await sleep(CONFIG.REQUEST_DELAY_MS);
-                }
-                
-                if (allVideos.length === 0) {
-                    this.updateStatus('No videos found for this user');
-                    return;
-                }
-                
-                this.updateStatus(`Processing ${allVideos.length} videos...`);
-                const result = FileHandler.saveVideoUrls(allVideos, this.downloadOptions);
-                
-                this.updateStatus(`Download complete! Saved ${result.savedCount} videos`);
-            } catch (error) {
-                console.error('Download failed:', error);
-                this.updateStatus(`Error: ${error.message}`);
-            }
-        }
+    extractSecUserId() {
+      const secUserId = location.pathname.replace("/user/", "");
+      if (!secUserId || location.pathname.indexOf("/user/") === -1) {
+        throw new Error("Please run this script on a DouYin user profile page!");
+      }
+      return secUserId;
     }
 
-    async function run() {
-        // Wait for the page to load fully
-        setTimeout(() => {
-            addUI();
-            console.log('Douyin Video Downloader initialized');
-        }, 2000);
-    }
+    async fetchAllVideos(onProgress) {
+      let hasMore = true;
+      let maxCursor = 0;
 
-    // Initialize the script
-    run();
+      while (hasMore) {
+        const data = await retryWithDelay(() => this.apiClient.fetchVideos(maxCursor));
+        const { videoData, hasMore: more, maxCursor: newCursor } = VideoDataProcessor.processVideoData(data);
+
+        if (onProgress) {
+          onProgress(videoData);
+        }
+
+        hasMore = more;
+        maxCursor = newCursor;
+        await sleep(CONFIG.REQUEST_DELAY_MS);
+      }
+    }
+  }
+
+  // Initialize the UI
+  function initializeUI() {
+    const container = createMainUI();
+    document.body.appendChild(container);
+    setupEventListeners();
+  }
+
+  // Start the script
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", initializeUI);
+  } else {
+    initializeUI();
+  }
 })();
